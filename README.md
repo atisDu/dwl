@@ -10,7 +10,8 @@ On top of upstream dwl (wlroots 0.20):
 - zen mode (Mod+Shift+Z): minimal bar, kitty gets a centred text column
 - picom's look via [scenefx]: rounded corners, shadows, blur behind translucent windows
 - picom's animations with its own preset curves: open/show fade+scale in (0.12s), close/hide
-  fade+scale out from a snapshot of the last frame (0.10s), geometry slides on retile (0.10s)
+  fade+scale out from a snapshot of the last frame (0.10s), geometry slides on retile (0.10s);
+  tag switches swipe left/right like a row of workspaces (0.2s)
 - floating windows centred ([alwayscenter]); rules can set a floating size
 - separate touchpad/mouse acceleration ([mouse-trackpad-split]), touchscreen ([touch-input])
 - Xwayland on (upstream ships it off), for X-only apps

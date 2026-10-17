@@ -30,6 +30,8 @@ static const uint32_t appear_ms            = 120;
 static const uint32_t disappear_ms         = 100;
 static const uint32_t geometry_ms          = 100;
 static const float animscale               = 0.97f;
+/* not in picom: switching tags slides the windows sideways, like a row of workspaces */
+static const uint32_t swipe_ms             = 200;
 #define blur_params 3, 5, 0.0f, 1.0f, 1.0f, 1.0f /* passes, radius, noise, brightness, contrast, saturation */
 static const float rootcolor[]             = COLOR(0x1d1f21ff);
 static const float bordercolor[]           = COLOR(0x444444ff);

@@ -100,7 +100,7 @@
 /* enums */
 enum { SchemeNorm, SchemeSel, SchemeUrg }; /* color schemes */
 enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
-enum { AnimNone, AnimAppear, AnimGeom }; /* client animations */
+enum { AnimNone, AnimAppear, AnimGeom, AnimSwipe }; /* client animations */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBlur, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrUnmanaged, LyrOverlay,
 	LyrIMPopup, LyrBlock, NUM_LAYERS }; /* scene layers */
@@ -157,6 +157,7 @@ typedef struct {
 		struct wlr_scene_surface *image_capture_scene_surface;
 	} capture;
 	struct wl_listener commit;
+	struct wl_listener postcommit;
 	struct wl_listener map;
 	struct wl_listener maximize;
 	struct wl_listener unmap;
@@ -200,6 +201,7 @@ typedef struct { /* a closed or hidden window fading out */
 	int r;
 	float color[4];
 	uint32_t start;
+	int swipe; /* x offset it slides out to, 0 = picom's disappear */
 	GhostBuffer bufs[16];
 	int nbufs;
 } Ghost;
@@ -421,10 +423,11 @@ static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
 static void resize(Client *c, struct wlr_box geo, int interact);
 static void fxclient(Client *c);
+static void postcommit(struct wl_listener *listener, void *data);
 static void appear(Client *c);
 static void ghost(Client *c);
 static int ghostframe(Ghost *g);
-static int animtick(void *data);
+static void animupdate(void);
 static void run(char *startup_cmd);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
@@ -527,7 +530,7 @@ static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
 static struct wl_list ghosts;
-static struct wl_event_source *animtimer;
+static int swipe; /* view(): px new windows slide in from, old ones out to the other side */
 static int zen = 0; /* zen mode: minimal bar, no status/title/layout */
 static struct wl_list touches;
 static int consumed[KEY_MAX + 1];
@@ -2346,6 +2349,8 @@ mapnotify(struct wl_listener *listener, void *data)
 	wlr_scene_node_lower_to_bottom(&c->blur->node);
 	c->shadow = wlr_scene_shadow_create(c->scene, 0, 0, cornerradius, shadowradius, shadowcolor);
 	wlr_scene_node_lower_to_bottom(&c->shadow->node);
+	/* added after the scene surface's own commit listener, so it runs after it */
+	LISTEN(&client_surface(c)->events.commit, &c->postcommit, postcommit);
 
 	/* Initialize client geometry with room for border */
 	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT |
@@ -2736,6 +2741,7 @@ rendermon(struct wl_listener *listener, void *data)
 	Monitor *m = wl_container_of(listener, m, frame);
 	struct timespec now;
 
+	animupdate();
 	if (!wlr_scene_output_needs_frame(m->scene_output)) {
 		return;
 	}
@@ -2778,6 +2784,7 @@ requestmonstate(struct wl_listener *listener, void *data)
 static const float appearcurve[4] = {0.24f, 0.64f, 0.79f, 0.98f};
 static const float disappearcurve[4] = {0.21f, 0.02f, 0.76f, 0.36f};
 static const float geometrycurve[4] = {0.07f, 0.65f, 0.0f, 1.0f};
+static const float swipecurve[4] = {0.24f, 0.64f, 0.79f, 0.98f}; /* picom's slide-in, both ways */
 
 static uint32_t
 nowms(void)
@@ -2817,17 +2824,21 @@ scalebox(struct wlr_box b, float s)
 	return r;
 }
 
+/* animations step on every output frame (in rendermon), so each step lands on a vblank */
 static void
 animstart(void)
 {
-	wl_event_source_timer_update(animtimer, 1);
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link)
+		wlr_output_schedule_frame(m->wlr_output);
 }
 
 /* where and how opaque c is drawn right now; ends the animation when its time is up */
 static void
 animframe(Client *c, struct wlr_box *b, float *alpha)
 {
-	uint32_t ms = c->anim == AnimAppear ? appear_ms : geometry_ms;
+	uint32_t ms = c->anim == AnimAppear ? appear_ms : c->anim == AnimSwipe ? swipe_ms : geometry_ms;
 	float t = ms ? (float)(nowms() - c->animstart) / (float)ms : 1, p;
 
 	*b = c->geom;
@@ -2837,6 +2848,8 @@ animframe(Client *c, struct wlr_box *b, float *alpha)
 	} else if (c->anim == AnimAppear) {
 		*alpha = t;
 		*b = scalebox(c->geom, animscale + (1 - animscale) * bezier(appearcurve, t));
+	} else if (c->anim == AnimSwipe) { /* animfrom.x: the x offset it slides in from */
+		b->x += (int)roundf((float)c->animfrom.x * (1 - bezier(swipecurve, t)));
 	} else {
 		p = bezier(geometrycurve, t);
 		b->x = c->animfrom.x + (int)roundf((float)(c->geom.x - c->animfrom.x) * p);
@@ -2848,21 +2861,49 @@ animframe(Client *c, struct wlr_box *b, float *alpha)
 	c->animalpha = *alpha;
 }
 
+/* configured to a size the client hasn't committed yet */
+static int
+resizepending(Client *c)
+{
+	struct wlr_xdg_toplevel *t;
+
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		return 0;
+#endif
+	t = c->surface.xdg->toplevel;
+	return t->scheduled.width && (t->scheduled.width != t->current.width
+			|| t->scheduled.height != t->current.height);
+}
+
 static void
 fxbuffer(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 {
 	Client *c = data;
-	int main = !sx && !sy;
+	/* sx, sy count from the client's tree, so the main surface sits at the border offset */
+	int main = sx == c->scene_surface->node.x && sy == c->scene_surface->node.y;
 
 	/* ponytail: "main surface" = whatever buffer sits at the window's top-left; a
 	 * small subsurface parked there would get rounded and stretched too */
 	wlr_scene_buffer_set_corner_radius(buffer, main && !c->isfullscreen
 			? MAX(cornerradius - (int)c->bw, 0) : 0);
 	wlr_scene_buffer_set_opacity(buffer, c->animalpha);
-	/* like picom, stretch the current content to the animated size */
-	if (main && c->anim)
+	/* like picom, stretch the current content to the animated size, and keep doing it
+	 * until the client has drawn at its new size, or the gap shows the wallpaper */
+	if (main && (c->anim || resizepending(c)))
 		wlr_scene_buffer_set_dest_size(buffer, MAX(c->animbox.width - 2 * (int)c->bw, 1),
 				MAX(c->animbox.height - 2 * (int)c->bw, 1));
+}
+
+/* the scene resets buffer sizes on every commit: redo the stretch right after it,
+ * or a frame at the old size shows the wallpaper in the gap */
+void
+postcommit(struct wl_listener *listener, void *data)
+{
+	Client *c = wl_container_of(listener, c, postcommit);
+
+	if (c->anim || resizepending(c))
+		wlr_scene_node_for_each_buffer(&c->scene_surface->node, fxbuffer, c);
 }
 
 void
@@ -2908,6 +2949,14 @@ fxclient(Client *c)
 void
 appear(Client *c)
 {
+	if (swipe && swipe_ms) {
+		c->anim = AnimSwipe;
+		c->animfrom.x = swipe;
+		c->animstart = nowms();
+		fxclient(c);
+		animstart();
+		return;
+	}
 	if (!appear_ms)
 		return;
 	c->anim = AnimAppear;
@@ -2935,8 +2984,10 @@ ghostbuffer(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	gb->node->point_accepts_input = rejectinput;
 	wlr_scene_buffer_set_source_box(gb->node, &buffer->src_box);
 	wlr_scene_buffer_set_transform(gb->node, buffer->transform);
-	wlr_scene_buffer_set_corner_radius(gb->node, !sx && !sy ? MAX(g->r - (int)g->bw, 0) : 0);
-	gb->box = (struct wlr_box){ (int)g->bw + sx, (int)g->bw + sy,
+	/* sx, sy already include the border offset */
+	wlr_scene_buffer_set_corner_radius(gb->node, sx == (int)g->bw && sy == (int)g->bw
+			? MAX(g->r - (int)g->bw, 0) : 0);
+	gb->box = (struct wlr_box){ sx, sy,
 		buffer->dst_width ? buffer->dst_width : buffer->buffer->width,
 		buffer->dst_height ? buffer->dst_height : buffer->buffer->height };
 }
@@ -2948,9 +2999,10 @@ ghost(Client *c)
 {
 	Ghost *g;
 
-	if (!disappear_ms || !c->scene->node.enabled)
+	if (!(swipe ? swipe_ms : disappear_ms) || !c->scene->node.enabled)
 		return;
 	g = ecalloc(1, sizeof(*g));
+	g->swipe = -swipe;
 	g->geom = c->anim ? c->animbox : c->geom;
 	g->bw = c->bw;
 	g->r = c->isfullscreen ? 0 : cornerradius;
@@ -2975,10 +3027,18 @@ ghost(Client *c)
 int
 ghostframe(Ghost *g)
 {
-	float t = (float)(nowms() - g->start) / (float)disappear_ms;
+	float t = (float)(nowms() - g->start) / (float)(g->swipe ? swipe_ms : disappear_ms);
 	float a = 1 - t, s = 1 - (1 - animscale) * bezier(disappearcurve, t), color[4], shadow[4];
-	struct wlr_box b = scalebox(g->geom, s);
+	struct wlr_box b;
 	int i;
+
+	if (g->swipe) { /* slides out whole, in step with the windows sliding in */
+		a = s = 1;
+		b = g->geom;
+		b.x += (int)roundf((float)g->swipe * bezier(swipecurve, MIN(t, 1)));
+	} else {
+		b = scalebox(g->geom, s);
+	}
 
 	if (t >= 1) {
 		wlr_scene_node_destroy(&g->tree->node);
@@ -3015,8 +3075,8 @@ ghostframe(Ghost *g)
 	return 1;
 }
 
-int
-animtick(void *data)
+void
+animupdate(void)
 {
 	Client *c;
 	Ghost *g, *tmp;
@@ -3029,16 +3089,16 @@ animtick(void *data)
 		fxclient(c);
 		if (c->anim) {
 			more = 1;
-		} else { /* done: back to the client's real buffer sizes */
+		} else { /* done: back to the client's real buffer sizes (stretched while a resize is pending) */
 			client_get_clip(c, &clip);
 			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+			fxclient(c);
 		}
 	}
 	wl_list_for_each_safe(g, tmp, &ghosts, link)
 		more |= ghostframe(g);
 	if (more)
-		wl_event_source_timer_update(animtimer, 1000 / 120);
-	return 0;
+		animstart();
 }
 
 void
@@ -3307,7 +3367,6 @@ setup(void)
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
 	wl_list_init(&ghosts);
-	animtimer = wl_event_loop_add_timer(event_loop, animtick, NULL);
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -3879,6 +3938,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 
 	if (!client_is_unmanaged(c)) {
 		ghost(c); /* picom's close */
+		wl_list_remove(&c->postcommit.link);
 		wl_list_remove(&c->link);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
@@ -4107,13 +4167,20 @@ urgent(struct wl_listener *listener, void *data)
 void
 view(const Arg *arg)
 {
+	uint32_t old;
+
 	if (!selmon || (arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
 		return;
+	old = selmon->tagset[selmon->seltags];
 	selmon->seltags ^= 1; /* toggle sel tagset */
 	if (arg->ui & TAGMASK)
 		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
+	/* swipe like a row of workspaces: a tag to the right comes in from the right */
+	swipe = (__builtin_ctz(selmon->tagset[selmon->seltags]) > __builtin_ctz(old) ? 1 : -1)
+		* selmon->w.width;
 	focusclient(focustop(selmon), NULL, 1);
 	arrange(selmon);
+	swipe = 0;
 	drawbars();
 }
 
