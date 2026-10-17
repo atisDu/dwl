@@ -3,8 +3,8 @@
 # starts before the old one is killed, so there's no flash of the root colour.
 old=
 while :; do
-  # files only, plus one folder down, like feh given tapetes/*
-  img=$(find "$HOME/Attēli/tapetes" -maxdepth 2 -type f | shuf -n 1)
+  # files only (not dotfiles like KDE's .directory), plus one folder down, like feh
+  img=$(find "$HOME/Attēli/tapetes" -maxdepth 2 -type f -name "[!.]*" | shuf -n 1)
   swaybg -m fill -i "$img" & new=$!
   sleep 1
   if kill -0 "$new" 2>/dev/null; then  # keep the old one if this image failed to load

@@ -24,6 +24,12 @@ static const int cornerradius              = 6;
 static const int shadowradius              = 14;
 static const int shadowoffset              = -12;
 static const float shadowcolor[]           = {0.0f, 0.0f, 0.0f, 0.45f}; /* premultiplied */
+/* picom.conf animations: open/show "appear" 0.12s and close/hide "disappear" 0.10s
+ * at scale 0.97, "geometry-change" 0.10s; 0 turns one off */
+static const uint32_t appear_ms            = 120;
+static const uint32_t disappear_ms         = 100;
+static const uint32_t geometry_ms          = 100;
+static const float animscale               = 0.97f;
 #define blur_params 3, 5, 0.0f, 1.0f, 1.0f, 1.0f /* passes, radius, noise, brightness, contrast, saturation */
 static const float rootcolor[]             = COLOR(0x1d1f21ff);
 static const float bordercolor[]           = COLOR(0x444444ff);

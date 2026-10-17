@@ -9,6 +9,8 @@ On top of upstream dwl (wlroots 0.20):
 - dwm bar with systray ([bar], [bar-systray], ported to current dwl), fed by `slstatus -s`
 - zen mode (Mod+Shift+Z): minimal bar, kitty gets a centred text column
 - picom's look via [scenefx]: rounded corners, shadows, blur behind translucent windows
+- picom's animations with its own preset curves: open/show fade+scale in (0.12s), close/hide
+  fade+scale out from a snapshot of the last frame (0.10s), geometry slides on retile (0.10s)
 - floating windows centred ([alwayscenter]); rules can set a floating size
 - separate touchpad/mouse acceleration ([mouse-trackpad-split]), touchscreen ([touch-input])
 - keyboard layout menu (Mod+Shift+W): `pkill --signal RTMIN+n -x dwl` loads `kblayouts[n]`
@@ -50,7 +52,7 @@ wmenu with dmenu's match highlighting:
 | `btmenu`, `wifimenu`, `powermenu`, `stt` | dmenu -> wmenu, xdotool -> wtype |
 | `battnotify`, `netnotify` | unchanged |
 
-Not ported: picom's open/close animations and fades, dwm's SIGHUP self-restart
+Not ported: dwm's SIGHUP self-restart
 (restarting a Wayland compositor closes every window, and scale changes apply live
 anyway), DPMS-off on idle (dwl needs wlopm for that).
 

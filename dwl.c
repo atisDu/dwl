@@ -100,6 +100,7 @@
 /* enums */
 enum { SchemeNorm, SchemeSel, SchemeUrg }; /* color schemes */
 enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
+enum { AnimNone, AnimAppear, AnimGeom }; /* client animations */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBlur, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrUnmanaged, LyrOverlay,
 	LyrIMPopup, LyrBlock, NUM_LAYERS }; /* scene layers */
@@ -177,7 +178,31 @@ typedef struct {
 	int isfloating, isurgent, isfullscreen;
 	struct wlr_scene_shadow *shadow;
 	struct wlr_scene_blur *blur;
+	int anim;
+	uint32_t animstart;
+	struct wlr_box animfrom, animbox; /* geometry-change start, box drawn now */
+	float animalpha;
 } Client;
+
+typedef struct {
+	struct wlr_scene_buffer *node;
+	struct wlr_box box; /* in the window, unscaled */
+} GhostBuffer;
+
+typedef struct { /* a closed or hidden window fading out */
+	struct wl_list link;
+	struct wlr_scene_tree *tree;
+	struct wlr_scene_rect *frame;
+	struct wlr_scene_shadow *shadow;
+	struct wlr_scene_blur *blur;
+	struct wlr_box geom;
+	unsigned int bw;
+	int r;
+	float color[4];
+	uint32_t start;
+	GhostBuffer bufs[16];
+	int nbufs;
+} Ghost;
 
 typedef struct {
 	uint32_t mod;
@@ -396,6 +421,10 @@ static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
 static void resize(Client *c, struct wlr_box geo, int interact);
 static void fxclient(Client *c);
+static void appear(Client *c);
+static void ghost(Client *c);
+static int ghostframe(Ghost *g);
+static int animtick(void *data);
 static void run(char *startup_cmd);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
@@ -497,6 +526,8 @@ static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
+static struct wl_list ghosts;
+static struct wl_event_source *animtimer;
 static int zen = 0; /* zen mode: minimal bar, no status/title/layout */
 static struct wl_list touches;
 static int consumed[KEY_MAX + 1];
@@ -644,6 +675,8 @@ arrange(Monitor *m)
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m) {
+			if (VISIBLEON(c, m) != c->scene->node.enabled) /* picom's show / hide */
+				VISIBLEON(c, m) ? appear(c) : ghost(c);
 			wlr_scene_node_set_enabled(&c->scene->node, VISIBLEON(c, m));
 			client_set_suspended(c, !VISIBLEON(c, m)
 					&& (!c->image_capture_source
@@ -2741,50 +2774,278 @@ requestmonstate(struct wl_listener *listener, void *data)
 	updatemons(NULL, NULL);
 }
 
+/* picom's animation presets (data/animation_presets.conf); opacity is linear */
+static const float appearcurve[4] = {0.24f, 0.64f, 0.79f, 0.98f};
+static const float disappearcurve[4] = {0.21f, 0.02f, 0.76f, 0.36f};
+static const float geometrycurve[4] = {0.07f, 0.65f, 0.0f, 1.0f};
+
+static uint32_t
+nowms(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint32_t)(t.tv_sec * 1000 + t.tv_nsec / 1000000);
+}
+
+/* cubic-bezier(p) at time t: solve x(s) = t by bisection, return y(s) */
+static float
+bezier(const float p[4], float t)
+{
+	float lo = 0, hi = 1, s = t, x;
+	int i;
+
+	for (i = 0; i < 20; i++) {
+		x = 3 * (1 - s) * (1 - s) * s * p[0] + 3 * (1 - s) * s * s * p[2] + s * s * s;
+		if (x < t)
+			lo = s;
+		else
+			hi = s;
+		s = (lo + hi) / 2;
+	}
+	return 3 * (1 - s) * (1 - s) * s * p[1] + 3 * (1 - s) * s * s * p[3] + s * s * s;
+}
+
+/* b scaled by s around its centre */
+static struct wlr_box
+scalebox(struct wlr_box b, float s)
+{
+	struct wlr_box r = { .width = (int)roundf(b.width * s), .height = (int)roundf(b.height * s) };
+
+	r.x = b.x + (b.width - r.width) / 2;
+	r.y = b.y + (b.height - r.height) / 2;
+	return r;
+}
+
 static void
-roundbuffer(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
+animstart(void)
+{
+	wl_event_source_timer_update(animtimer, 1);
+}
+
+/* where and how opaque c is drawn right now; ends the animation when its time is up */
+static void
+animframe(Client *c, struct wlr_box *b, float *alpha)
+{
+	uint32_t ms = c->anim == AnimAppear ? appear_ms : geometry_ms;
+	float t = ms ? (float)(nowms() - c->animstart) / (float)ms : 1, p;
+
+	*b = c->geom;
+	*alpha = 1;
+	if (c->anim == AnimNone || t >= 1) {
+		c->anim = AnimNone;
+	} else if (c->anim == AnimAppear) {
+		*alpha = t;
+		*b = scalebox(c->geom, animscale + (1 - animscale) * bezier(appearcurve, t));
+	} else {
+		p = bezier(geometrycurve, t);
+		b->x = c->animfrom.x + (int)roundf((float)(c->geom.x - c->animfrom.x) * p);
+		b->y = c->animfrom.y + (int)roundf((float)(c->geom.y - c->animfrom.y) * p);
+		b->width = c->animfrom.width + (int)roundf((float)(c->geom.width - c->animfrom.width) * p);
+		b->height = c->animfrom.height + (int)roundf((float)(c->geom.height - c->animfrom.height) * p);
+	}
+	c->animbox = *b;
+	c->animalpha = *alpha;
+}
+
+static void
+fxbuffer(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 {
 	Client *c = data;
+	int main = !sx && !sy;
 
-	/* ponytail: rounds whatever buffer sits at the window's top-left, i.e. the main
-	 * surface; a small subsurface parked there would get rounded too */
-	wlr_scene_buffer_set_corner_radius(buffer, !sx && !sy && !c->isfullscreen
+	/* ponytail: "main surface" = whatever buffer sits at the window's top-left; a
+	 * small subsurface parked there would get rounded and stretched too */
+	wlr_scene_buffer_set_corner_radius(buffer, main && !c->isfullscreen
 			? MAX(cornerradius - (int)c->bw, 0) : 0);
+	wlr_scene_buffer_set_opacity(buffer, c->animalpha);
+	/* like picom, stretch the current content to the animated size */
+	if (main && c->anim)
+		wlr_scene_buffer_set_dest_size(buffer, MAX(c->animbox.width - 2 * (int)c->bw, 1),
+				MAX(c->animbox.height - 2 * (int)c->bw, 1));
 }
 
 void
 fxclient(Client *c)
 {
-	/* picom's look: rounded corners, a soft shadow, blur behind translucent windows.
-	 * border[0] becomes the whole rounded frame with the inside clipped out. */
+	/* picom's look: rounded corners, a soft shadow, blur behind translucent windows,
+	 * drawn at the animated box. border[0] becomes the whole rounded frame with the
+	 * inside clipped out; border[1] keeps the unfaded border colour. */
 	int r = c->isfullscreen ? 0 : cornerradius;
+	float color[4], shadow[4];
+	struct wlr_box b;
+	float a;
 	int i;
 
-	wlr_scene_rect_set_size(c->border[0], c->geom.width, c->geom.height);
-	wlr_scene_node_set_position(&c->border[0]->node, 0, 0);
+	animframe(c, &b, &a);
+	for (i = 0; i < 4; i++) {
+		color[i] = c->border[1]->color[i] * a;
+		shadow[i] = shadowcolor[i] * a;
+	}
+	wlr_scene_node_set_position(&c->scene->node, b.x, b.y);
+	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
+	wlr_scene_rect_set_size(c->border[0], b.width, b.height);
+	wlr_scene_rect_set_color(c->border[0], color);
 	wlr_scene_rect_set_corner_radius(c->border[0], r);
 	wlr_scene_rect_set_clipped_region(c->border[0], (struct clipped_region){
-		.area = { c->bw, c->bw, c->geom.width - 2 * c->bw, c->geom.height - 2 * c->bw },
+		.area = { c->bw, c->bw, b.width - 2 * c->bw, b.height - 2 * c->bw },
 		.corners = corner_radii_all(r - (int)c->bw) });
 	for (i = 1; i < 4; i++)
 		wlr_scene_node_set_enabled(&c->border[i]->node, 0);
-	wlr_scene_node_for_each_buffer(&c->scene_surface->node, roundbuffer, c);
+	wlr_scene_node_for_each_buffer(&c->scene_surface->node, fxbuffer, c);
 
 	wlr_scene_node_set_enabled(&c->shadow->node, !c->isfullscreen);
 	wlr_scene_node_set_position(&c->shadow->node, shadowoffset, shadowoffset);
-	wlr_scene_shadow_set_size(c->shadow, c->geom.width + 2 * shadowradius,
-			c->geom.height + 2 * shadowradius);
+	wlr_scene_shadow_set_size(c->shadow, b.width + 2 * shadowradius, b.height + 2 * shadowradius);
 	wlr_scene_shadow_set_corner_radius(c->shadow, r);
+	wlr_scene_shadow_set_color(c->shadow, shadow);
 
-	wlr_scene_blur_set_size(c->blur, c->geom.width, c->geom.height);
+	wlr_scene_blur_set_size(c->blur, b.width, b.height);
 	wlr_scene_blur_set_corner_radius(c->blur, r);
+	wlr_scene_blur_set_alpha(c->blur, a);
+}
+
+void
+appear(Client *c)
+{
+	if (!appear_ms)
+		return;
+	c->anim = AnimAppear;
+	c->animstart = nowms();
+	fxclient(c); /* transparent before the first frame */
+	animstart();
+}
+
+static bool
+rejectinput(struct wlr_scene_buffer *buffer, double *sx, double *sy)
+{
+	return false;
+}
+
+static void
+ghostbuffer(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
+{
+	Ghost *g = data;
+	GhostBuffer *gb;
+
+	if (!buffer->buffer || g->nbufs == (int)LENGTH(g->bufs))
+		return;
+	gb = &g->bufs[g->nbufs++];
+	gb->node = wlr_scene_buffer_create(g->tree, buffer->buffer);
+	gb->node->point_accepts_input = rejectinput;
+	wlr_scene_buffer_set_source_box(gb->node, &buffer->src_box);
+	wlr_scene_buffer_set_transform(gb->node, buffer->transform);
+	wlr_scene_buffer_set_corner_radius(gb->node, !sx && !sy ? MAX(g->r - (int)g->bw, 0) : 0);
+	gb->box = (struct wlr_box){ (int)g->bw + sx, (int)g->bw + sy,
+		buffer->dst_width ? buffer->dst_width : buffer->buffer->width,
+		buffer->dst_height ? buffer->dst_height : buffer->buffer->height };
+}
+
+/* picom's "disappear" for a window that closes or leaves the view: its last frame,
+ * snapshotted into a tree of its own that fades and shrinks after the window is gone */
+void
+ghost(Client *c)
+{
+	Ghost *g;
+
+	if (!disappear_ms || !c->scene->node.enabled)
+		return;
+	g = ecalloc(1, sizeof(*g));
+	g->geom = c->anim ? c->animbox : c->geom;
+	g->bw = c->bw;
+	g->r = c->isfullscreen ? 0 : cornerradius;
+	g->start = nowms();
+	memcpy(g->color, c->border[1]->color, sizeof(g->color));
+	g->tree = wlr_scene_tree_create(c->scene->node.parent);
+	wlr_scene_node_place_above(&g->tree->node, &c->scene->node);
+	if (!c->isfullscreen)
+		g->shadow = wlr_scene_shadow_create(g->tree, 0, 0, g->r, shadowradius, shadowcolor);
+	g->blur = wlr_scene_blur_create(g->tree, 0, 0);
+	wlr_scene_blur_set_should_only_blur_bottom_layer(g->blur, true);
+	wlr_scene_blur_set_corner_radius(g->blur, g->r);
+	g->frame = wlr_scene_rect_create(g->tree, 0, 0, g->color);
+	wlr_scene_rect_set_corner_radius(g->frame, g->r);
+	wlr_scene_node_for_each_buffer(&c->scene_surface->node, ghostbuffer, g);
+	wl_list_insert(&ghosts, &g->link);
+	ghostframe(g);
+	animstart();
+}
+
+/* returns 0 once the ghost is done and freed */
+int
+ghostframe(Ghost *g)
+{
+	float t = (float)(nowms() - g->start) / (float)disappear_ms;
+	float a = 1 - t, s = 1 - (1 - animscale) * bezier(disappearcurve, t), color[4], shadow[4];
+	struct wlr_box b = scalebox(g->geom, s);
+	int i;
+
+	if (t >= 1) {
+		wlr_scene_node_destroy(&g->tree->node);
+		wl_list_remove(&g->link);
+		free(g);
+		return 0;
+	}
+	for (i = 0; i < 4; i++) {
+		color[i] = g->color[i] * a;
+		shadow[i] = shadowcolor[i] * a;
+	}
+	wlr_scene_node_set_position(&g->tree->node, b.x, b.y);
+	wlr_scene_rect_set_size(g->frame, b.width, b.height);
+	wlr_scene_rect_set_color(g->frame, color);
+	wlr_scene_rect_set_clipped_region(g->frame, (struct clipped_region){
+		.area = { g->bw, g->bw, b.width - 2 * g->bw, b.height - 2 * g->bw },
+		.corners = corner_radii_all(g->r - (int)g->bw) });
+	if (g->shadow) {
+		wlr_scene_node_set_position(&g->shadow->node, shadowoffset, shadowoffset);
+		wlr_scene_shadow_set_size(g->shadow, b.width + 2 * shadowradius, b.height + 2 * shadowradius);
+		wlr_scene_shadow_set_color(g->shadow, shadow);
+	}
+	wlr_scene_blur_set_size(g->blur, b.width, b.height);
+	wlr_scene_blur_set_alpha(g->blur, a);
+	for (i = 0; i < g->nbufs; i++) {
+		GhostBuffer *gb = &g->bufs[i];
+
+		wlr_scene_node_set_position(&gb->node->node, (int)roundf((float)gb->box.x * s),
+				(int)roundf((float)gb->box.y * s));
+		wlr_scene_buffer_set_dest_size(gb->node, MAX((int)roundf((float)gb->box.width * s), 1),
+				MAX((int)roundf((float)gb->box.height * s), 1));
+		wlr_scene_buffer_set_opacity(gb->node, a);
+	}
+	return 1;
+}
+
+int
+animtick(void *data)
+{
+	Client *c;
+	Ghost *g, *tmp;
+	struct wlr_box clip;
+	int more = 0;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!c->anim)
+			continue;
+		fxclient(c);
+		if (c->anim) {
+			more = 1;
+		} else { /* done: back to the client's real buffer sizes */
+			client_get_clip(c, &clip);
+			wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+		}
+	}
+	wl_list_for_each_safe(g, tmp, &ghosts, link)
+		more |= ghostframe(g);
+	if (more)
+		wl_event_source_timer_update(animtimer, 1000 / 120);
+	return 0;
 }
 
 void
 resize(Client *c, struct wlr_box geo, int interact)
 {
 	struct wlr_box *bbox;
-	struct wlr_box clip;
+	struct wlr_box clip, old = c->geom;
 
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
@@ -2795,21 +3056,20 @@ resize(Client *c, struct wlr_box geo, int interact)
 	c->geom = geo;
 	applybounds(c, bbox);
 
-	/* Update scene-graph, including borders */
-	wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
-	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-	wlr_scene_rect_set_size(c->border[0], c->geom.width, c->bw);
-	wlr_scene_rect_set_size(c->border[1], c->geom.width, c->bw);
-	wlr_scene_rect_set_size(c->border[2], c->bw, c->geom.height - 2 * c->bw);
-	wlr_scene_rect_set_size(c->border[3], c->bw, c->geom.height - 2 * c->bw);
-	wlr_scene_node_set_position(&c->border[1]->node, 0, c->geom.height - c->bw);
-	wlr_scene_node_set_position(&c->border[2]->node, 0, c->bw);
-	wlr_scene_node_set_position(&c->border[3]->node, c->geom.width - c->bw, c->bw);
-	fxclient(c);
+	/* picom's "geometry-change": slide from where it was drawn to the new geometry.
+	 * Not while dragging with the mouse, and not over an "appear". */
+	if (!interact && geometry_ms && c->anim != AnimAppear && c->scene->node.enabled
+			&& old.width && !wlr_box_equal(&old, &c->geom)) {
+		c->animfrom = c->anim == AnimGeom ? c->animbox : old;
+		c->anim = AnimGeom;
+		c->animstart = nowms();
+		animstart();
+	}
 
 	client_set_size(c, c->geom.width - 2 * c->bw, c->geom.height - 2 * c->bw);
 	client_get_clip(c, &clip);
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	fxclient(c); /* after the clip, which resets buffer sizes the animation stretches */
 }
 
 void
@@ -3046,6 +3306,8 @@ setup(void)
 	 * clients from the Unix socket, managing Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	wl_list_init(&ghosts);
+	animtimer = wl_event_loop_add_timer(event_loop, animtick, NULL);
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -3616,6 +3878,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 		focused_client = NULL;
 
 	if (!client_is_unmanaged(c)) {
+		ghost(c); /* picom's close */
 		wl_list_remove(&c->link);
 		setmon(c, NULL, 0);
 		wl_list_remove(&c->flink);
