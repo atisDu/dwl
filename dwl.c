@@ -2933,6 +2933,9 @@ fxclient(Client *c)
 		.corners = corner_radii_all(r - (int)c->bw) });
 	for (i = 1; i < 4; i++)
 		wlr_scene_node_set_enabled(&c->border[i]->node, 0);
+	/* no border (fullscreen): drop the frame, or its fully clipped rect over the
+	 * window still counts as visible and blocks direct scanout */
+	wlr_scene_node_set_enabled(&c->border[0]->node, c->bw > 0);
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node, fxbuffer, c);
 
 	wlr_scene_node_set_enabled(&c->shadow->node, !c->isfullscreen);
@@ -3349,6 +3352,17 @@ setsel(struct wl_listener *listener, void *data)
 	wlr_seat_set_selection(seat, event->source, event->serial);
 }
 
+/* log_level as usual, plus wlroots' "Direct scan-out enabled/disabled" (a debug
+ * message) so the session log shows whether fullscreen games skip compositing */
+static void
+logfilter(enum wlr_log_importance importance, const char *fmt, va_list args)
+{
+	if (importance > log_level && !strstr(fmt, "Direct scan-out"))
+		return;
+	vfprintf(stderr, fmt, args);
+	fputc('\n', stderr);
+}
+
 void
 setup(void)
 {
@@ -3360,7 +3374,7 @@ setup(void)
 		sigaction(sig[i], &sa, NULL);
 
 
-	wlr_log_init(log_level, NULL);
+	wlr_log_init(WLR_DEBUG, logfilter);
 
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, managing Wayland globals, and so on. */
