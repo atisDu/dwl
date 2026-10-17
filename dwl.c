@@ -917,7 +917,7 @@ buttonpress(struct wl_listener *listener, void *data)
 			break;
 
 		if (!c &&
-			(node = wlr_scene_node_at(&layers[LyrBottom]->node, cursor->x, cursor->y, NULL, NULL)) &&
+			(node = wlr_scene_node_at(&layers[LyrTop]->node, cursor->x, cursor->y, NULL, NULL)) &&
 			(buffer = wlr_scene_buffer_from_node(node)) && buffer == selmon->scene_buffer) {
 			cx = (cursor->x - selmon->m.x) * selmon->wlr_output->scale;
 			traywidth = tray_get_width(selmon->tray);
@@ -1472,7 +1472,7 @@ createmon(struct wl_listener *listener, void *data)
 	if (!(m->drw = drwl_create()))
 		die("failed to create drwl context");
 
-	m->scene_buffer = wlr_scene_buffer_create(layers[LyrBottom], NULL);
+	m->scene_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL); /* above windows like dwm's bar, so their shadows pass under it */
 	m->scene_buffer->point_accepts_input = baracceptsinput;
 	updatebar(m);
 
