@@ -13,4 +13,7 @@ export QT_QUICK_CONTROLS_STYLE=DwmStyle
 # native Wayland where the toolkit can, Xwayland otherwise
 export QT_QPA_PLATFORM='wayland;xcb' MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=auto
 
-exec sh -c 'slstatus -s | dwl -s /home/atis/Projekti/dwl/scripts/autostart'
+# the display manager's PATH lacks these; ~/.local/bin has the highlighting wmenu
+export PATH="/home/atis/Projekti/dwl/scripts:$HOME/.local/bin:$PATH"
+
+exec sh -c 'slstatus -s | /home/atis/Projekti/dwl/dwl -s /home/atis/Projekti/dwl/scripts/autostart'

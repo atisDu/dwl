@@ -1,5 +1,7 @@
 [Desktop Entry]
 Name=dwl
 Comment=dwm for Wayland
-Exec=dwl
+Exec=/home/atis/Projekti/dwl/scripts/dwl-session
+TryExec=/home/atis/Projekti/dwl/scripts/dwl-session
 Type=Application
+DesktopNames=dwl

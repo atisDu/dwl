@@ -19,6 +19,12 @@ static const int showsystray               = 1; /* 0 means no systray */
 static const int showbar                   = 1; /* 0 means no bar */
 static const int topbar                    = 1; /* 0 means bottom bar */
 static const char *fonts[]                 = {"Fantasque Sans Mono:size=14"};
+/* picom.conf: corner-radius 6, shadow-radius 14 / offset -12 / opacity 0.45, dual_kawase blur 5 */
+static const int cornerradius              = 6;
+static const int shadowradius              = 14;
+static const int shadowoffset              = -12;
+static const float shadowcolor[]           = {0.0f, 0.0f, 0.0f, 0.45f}; /* premultiplied */
+#define blur_params 3, 5, 0.0f, 1.0f, 1.0f, 1.0f /* passes, radius, noise, brightness, contrast, saturation */
 static const float rootcolor[]             = COLOR(0x1d1f21ff);
 static const float bordercolor[]           = COLOR(0x444444ff);
 static const float focuscolor[]            = COLOR(0x040707ff);
@@ -71,11 +77,15 @@ static const MonitorRule monrules[] = {
 };
 
 /* keyboard */
-/* group 0 = latvian, group 1 = finnish (~/.config/xkb/symbols/fiqwerty); kbcmd switches */
 static const struct xkb_rule_names xkb_rules = {
-	.layout = "lv,fiqwerty",
-	.variant = "apostrophe,basic",
+	.layout = "lv",
+	.variant = "apostrophe",
 	.options = NULL,
+};
+/* kbcmd picks one: `pkill --signal RTMIN+n -x dwl` loads kblayouts[n] */
+static const struct xkb_rule_names kblayouts[] = {
+	{ .layout = "lv", .variant = "apostrophe" },
+	{ .layout = "fiqwerty", .variant = "basic" }, /* ~/.config/xkb/symbols/fiqwerty */
 };
 
 static const int repeat_rate = 25;
@@ -138,7 +148,7 @@ static const char *lockcmd[] = { SCRIPTS "lock", NULL };
 static const char *powermenucmd[] = { SCRIPTS "powermenu", NULL };
 static const char *powercmd[] = { "/bin/sh", "-c",
 	"printf 'performance\\nbalanced\\npower-saver\\n' | " MENUSH " -p 'power:' | xargs -r powerprofilesctl set; pkill -USR1 slstatus", NULL };
-/* groups from xkb_rules above; dwl switches on SIGRTMIN+group */
+/* indexes into kblayouts above */
 static const char *kbcmd[] = { "/bin/sh", "-c",
 	"case $(printf 'latvian\\nfinnish\\n' | " MENUSH " -p 'kbd:') in "
 	"latvian) pkill --signal RTMIN -x dwl ;; "
