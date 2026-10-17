@@ -1,0 +1,9 @@
+#!/bin/sh
+# screenshot full|region [clip]: grim (+ slurp), saved where and as Spectacle saved them.
+geom=
+if [ "$1" = region ]; then geom=$(slurp) || exit; fi
+if [ "$2" = clip ]; then
+  grim ${geom:+-g "$geom"} - | wl-copy -t image/png
+else
+  grim ${geom:+-g "$geom"} "$(xdg-user-dir PICTURES)/Ekrānattēls_$(date +%Y%m%d_%H%M%S).png"
+fi

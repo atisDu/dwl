@@ -1,0 +1,58 @@
+#!/bin/sh
+# External monitor plugged in -> external only. Wayland scales each output itself and
+# running apps follow live, so unlike the X version there's no DPI juggling, no dwm
+# restart and no pointer-speed matrix: every output just gets its scale.
+INTERNAL=eDP-1
+INTMODE="--mode 2880x1800@120"   # the preferred mode is 60Hz
+EXTMODE="--mode 1920x1080"       # --preferred picks the monitor's choice, not always this
+SCALE_INTERNAL=1.6               # = the X session's DPI 154 / 96
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/screen-scale   # "OUTPUT PERCENT" per line, from screenmenu
+
+# Per-output scale: the saved % if screenmenu set one, else the taste value for the
+# panel, else the monitor's real DPI / 96 from its mm size (never below 1).
+scale_of() {
+	pct=$([ -f "$CONF" ] && awk -v o="$1" '$1==o{print $2}' "$CONF")
+	[ -n "$pct" ] && { awk -v p="$pct" 'BEGIN{print p/100}'; return; }
+	[ "$1" = "$INTERNAL" ] && { echo $SCALE_INTERNAL; return; }
+	wlr-randr --json | jq -r --arg o "$1" '.[] | select(.name == $o) |
+		((.modes[] | select(.current) | .width) // (.modes[] | select(.preferred) | .width)) as $px |
+		if .physical_size.width > 0 then [($px * 25.4 / .physical_size.width / 96 * 20 | round) / 20, 1] | max else 1 end'
+}
+
+externals() { wlr-randr --json | jq -r --arg i "$INTERNAL" '.[] | select(.name != $i) | .name'; }
+
+apply() {
+	ext=$(externals | head -1)
+	if [ -z "$ext" ]; then
+		wlr-randr --output "$INTERNAL" --on $INTMODE --scale "$(scale_of "$INTERNAL")"
+	else
+		# on first, so it has a current mode for scale_of
+		wlr-randr --output "$ext" --on $EXTMODE --pos 0,0 2>/dev/null ||
+			wlr-randr --output "$ext" --on --preferred --pos 0,0
+		set -- --output "$ext" --scale "$(scale_of "$ext")" --output "$INTERNAL" --off
+		for o in $(externals | grep -vx "$ext"); do set -- "$@" --output "$o" --off; done
+		wlr-randr "$@"
+	fi
+}
+
+# every enabled output to its scale, after screenmenu changed the layout
+rescale() {
+	for o in $(wlr-randr --json | jq -r '.[] | select(.enabled) | .name'); do
+		set -- "$@" --output "$o" --scale "$(scale_of "$o")"
+	done
+	[ $# -gt 0 ] && wlr-randr "$@"
+}
+
+case "$1" in
+	rescale) rescale; exit ;;
+	watch) ;;
+	*) apply; exit ;;
+esac
+
+# ponytail: 2s sysfs poll instead of a udev rule - no root needed
+while :; do
+	now=$(cat /sys/class/drm/card*/status)
+	[ "$now" = "$was" ] || { sleep 1; apply; }
+	was=$now
+	sleep 2
+done

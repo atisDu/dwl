@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+# org.freedesktop.ScreenSaver Inhibit/UnInhibit for dwl: `ssinhibit CMD...` runs the
+# idle daemon CMD (swayidle) only while no app holds an inhibit, and restarts it when
+# the last one is released, so its timers start over. Native Wayland apps use the
+# idle-inhibit protocol instead, which swayidle honours by itself.
+import itertools, subprocess, sys
+from gi.repository import Gio, GLib
+
+idle = None  # the idle daemon, while it runs
+
+XML = """<node><interface name="org.freedesktop.ScreenSaver">
+<method name="Inhibit"><arg type="s" direction="in"/><arg type="s" direction="in"/>
+<arg type="u" direction="out"/></method>
+<method name="UnInhibit"><arg type="u" direction="in"/></method>
+</interface></node>"""
+
+cookies = {}   # cookie -> sender
+watches = {}   # sender -> watch id
+next_cookie = itertools.count(1)
+
+
+def apply():
+    global idle
+    if cookies and idle:
+        idle.terminate()
+        idle.wait()
+        idle = None
+    elif not cookies and not idle:
+        idle = subprocess.Popen(sys.argv[1:])
+
+
+def drop_sender(sender):
+    for c in [c for c, s in cookies.items() if s == sender]:
+        del cookies[c]
+    if sender in watches:
+        Gio.bus_unwatch_name(watches.pop(sender))
+    apply()
+
+
+def call(conn, sender, path, iface, method, params, inv):
+    if method == "Inhibit":
+        c = next(next_cookie)
+        cookies[c] = sender
+        if sender not in watches:  # release if the app dies holding it
+            watches[sender] = Gio.bus_watch_name_on_connection(
+                conn, sender, Gio.BusNameWatcherFlags.NONE, None,
+                lambda _c, name: drop_sender(name))
+        apply()
+        inv.return_value(GLib.Variant("(u)", (c,)))
+    elif method == "UnInhibit":
+        cookies.pop(params.unpack()[0], None)
+        apply()
+        inv.return_value(None)
+
+
+def on_bus(conn, _name):
+    iface = Gio.DBusNodeInfo.new_for_xml(XML).interfaces[0]
+    for path in ("/org/freedesktop/ScreenSaver", "/ScreenSaver"):
+        conn.register_object(path, iface, call, None, None)
+
+
+Gio.bus_own_name(Gio.BusType.SESSION, "org.freedesktop.ScreenSaver",
+                 Gio.BusNameOwnerFlags.NONE, on_bus, None,
+                 lambda *_: print("ssinhibit: name taken/lost"))
+apply()
+GLib.MainLoop().run()

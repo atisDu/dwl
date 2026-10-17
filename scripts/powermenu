@@ -1,0 +1,21 @@
+#!/bin/sh
+mydmenu() {
+  wmenu -i -f 'Fantasque Sans Mono 14' -N '#1d1f21' -n '#eeeeee' -M '#040707' -m '#eeeeee' -S '#040707' -s '#eeeeee' "$@"
+}
+
+choice=$(printf 'suspend\nhibernate\nrestart\nshutdown\n' | mydmenu -p 'power:')
+
+case "$choice" in
+suspend)
+  systemctl suspend
+  ;;
+hibernate)
+  systemctl hibernate
+  ;;
+restart)
+  [ "$(printf 'no\nyes\n' | mydmenu -p 'restart — are you sure?')" = "yes" ] && systemctl reboot
+  ;;
+shutdown)
+  [ "$(printf 'no\nyes\n' | mydmenu -p 'shutdown — are you sure?')" = "yes" ] && systemctl poweroff
+  ;;
+esac

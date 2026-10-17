@@ -1,0 +1,7 @@
+#!/bin/sh
+# hyprlock: blurred screen, clock, fingerprint or password (see ../hyprlock.conf).
+# Returns once the lock is up, so swayidle's before-sleep doesn't suspend an unlocked
+# screen and Mod+Shift+L / idle can call it while already locked.
+pidof -q hyprlock && exit
+hyprlock -c /home/atis/Projekti/dwl/hyprlock.conf &
+sleep 1

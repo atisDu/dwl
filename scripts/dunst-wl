@@ -1,0 +1,15 @@
+#!/bin/sh
+# ~/.config/dunst/dunstrc sizes are physical px for the X session. Wayland scales them by
+# the output (1.6 on the panel), so run dunst on a copy with every size divided by 1.6.
+conf=${XDG_RUNTIME_DIR:-/tmp}/dunstrc-wayland
+awk -v s=1.6 '
+/^[[:space:]]*(font|width|height|offset|padding|horizontal_padding|text_icon_padding|gap_size|max_icon_size)[[:space:]]*=/ {
+	line = $0; out = ""
+	while (match(line, /[0-9]+/)) {
+		out = out substr(line, 1, RSTART - 1) int(substr(line, RSTART, RLENGTH) / s + 0.5)
+		line = substr(line, RSTART + RLENGTH)
+	}
+	$0 = out line
+}
+{ print }' "${XDG_CONFIG_HOME:-$HOME/.config}/dunst/dunstrc" > "$conf"
+exec dunst -conf "$conf"

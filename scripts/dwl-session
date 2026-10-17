@@ -1,0 +1,16 @@
+#!/bin/sh
+# Wayland twin of ~/.xinitrc: environment, then dwl with slstatus feeding its bar.
+# The rest of the session starts from autostart once dwl's socket is up.
+mkdir -p ~/.local/state && exec >>~/.local/state/dwl-session.log 2>&1
+echo "=== session start $(date -Is) ==="
+
+export XDG_CURRENT_DESKTOP=dwl XDG_SESSION_DESKTOP=dwl XDG_SESSION_TYPE=wayland
+export XCURSOR_THEME=breeze_cursors XCURSOR_SIZE=24
+export QT_QPA_PLATFORMTHEME=kde
+# Qt Quick apps (librepods etc.): Breeze with the dwm-coloured switches, as in ~/.xinitrc
+export QML_IMPORT_PATH="$HOME/.local/share/qml"
+export QT_QUICK_CONTROLS_STYLE=DwmStyle
+# native Wayland where the toolkit can, Xwayland otherwise
+export QT_QPA_PLATFORM='wayland;xcb' MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=auto
+
+exec sh -c 'slstatus -s | dwl -s /home/atis/Projekti/dwl/scripts/autostart'

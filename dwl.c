@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <dbus/dbus.h>
 #include <getopt.h>
+#include <time.h>
 #include <libinput.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
@@ -38,6 +39,7 @@
 #include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_input_device.h>
+#include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_group.h>
 #include <wlr/types/wlr_layer_shell_v1.h>
@@ -120,6 +122,7 @@ typedef struct {
 } Axis;
 
 typedef struct {
+	unsigned int click;
 	unsigned int mod;
 	unsigned int button;
 	void (*func)(const Arg *);
@@ -286,6 +289,7 @@ typedef struct {
 	uint32_t tags;
 	int isfloating;
 	int monitor;
+	int w, h; /* floating size, 0 = keep the client's */
 } Rule;
 
 typedef struct {
@@ -406,6 +410,8 @@ static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
 static void tile(Monitor *m);
 static void togglebar(const Arg *arg);
+static void togglezen(const Arg *arg);
+static int setkblayout(int signo, void *data);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
 static void toggletag(const Arg *arg);
@@ -487,6 +493,7 @@ static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
+static int zen = 0; /* zen mode: minimal bar, no status/title/layout */
 static struct wl_list touches;
 static int consumed[KEY_MAX + 1];
 
@@ -608,6 +615,8 @@ applyrules(Client *c)
 		if ((!r->title || strstr(title, r->title))
 				&& (!r->id || strstr(appid, r->id))) {
 			c->isfloating = r->isfloating;
+			if (r->w) c->geom.width = r->w + 2 * (int)c->bw;
+			if (r->h) c->geom.height = r->h + 2 * (int)c->bw;
 			newtags |= r->tags;
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
@@ -1781,6 +1790,23 @@ drawbar(Monitor *m)
 
 	traywidth = tray_get_width(m->tray);
 
+	if (zen) { /* minimal bar: selected tags left, HH:MM right */
+		time_t now = time(NULL);
+		char clk[6];
+
+		drwl_setscheme(m->drw, colors[SchemeNorm]);
+		drwl_rect(m->drw, 0, 0, m->b.width, m->b.height, 1, 1);
+		for (x = 0, i = 0; i < LENGTH(tags); i++)
+			if (m->tagset[m->seltags] & 1 << i)
+				x = drwl_text(m->drw, x, 0, TEXTW(m, tags[i]), m->b.height, m->lrpad / 2, tags[i], 0);
+		/* redrawn by every slstatus line on stdin, so no timer needed */
+		if (m == selmon && strftime(clk, sizeof clk, "%H:%M", localtime(&now))) {
+			w = TEXTW(m, clk);
+			drwl_text(m->drw, m->b.width - traywidth - w, 0, w, m->b.height, m->lrpad / 2, clk, 0);
+		}
+		goto tray;
+	}
+
 	/* draw status first so it can be overdrawn by tags later */
 	if (m == selmon) { /* status is only drawn on selected monitor */
 		drwl_setscheme(m->drw, colors[SchemeNorm]);
@@ -1823,6 +1849,7 @@ drawbar(Monitor *m)
 		}
 	}
 
+tray:
 	if (traywidth > 0) {
 		pixman_image_composite32(PIXMAN_OP_SRC,
 		                         m->tray->image, NULL, m->drw->image,
@@ -2857,6 +2884,16 @@ setfullscreen(Client *c, int fullscreen)
 	drawbars();
 }
 
+int
+setkblayout(int signo, void *data)
+{
+	struct wlr_keyboard *kb = &kb_group->wlr_group->keyboard;
+
+	wlr_keyboard_notify_modifiers(kb, kb->modifiers.depressed,
+		kb->modifiers.latched, kb->modifiers.locked, signo - SIGRTMIN);
+	return 0;
+}
+
 void
 setlayout(const Arg *arg)
 {
@@ -3163,6 +3200,10 @@ setup(void)
 	status_event_source = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
 		STDIN_FILENO, WL_EVENT_READABLE, statusin, NULL);
 
+	/* `pkill -RTMIN+n dwl` switches to xkb layout group n (see kbmenu) */
+	for (i = 0; i < 4; i++)
+		wl_event_loop_add_signal(event_loop, SIGRTMIN + i, setkblayout, NULL);
+
 	bus_conn = dbus_bus_get(DBUS_BUS_SESSION, NULL);
 	if (!bus_conn)
 		die("Failed to connect to bus");
@@ -3296,6 +3337,23 @@ tile(Monitor *m)
 }
 
 void
+togglezen(const Arg *arg)
+{
+	Client *sel = focustop(selmon);
+	int pad = 0;
+
+	zen = !zen;
+	drawbars();
+	/* kitty padding is in pts at 96 dpi per logical px, client widths are logical px.
+	 * ponytail: sized from the focused client at toggle time and applied to every
+	 * kitty instance; retile after toggling and it goes stale, hit Mod+Shift+Z twice. */
+	if (zen && sel && sel->geom.width > zenwidth)
+		pad = (sel->geom.width - zenwidth) / 2 * 72 / 96;
+	snprintf(zenpad, sizeof zenpad, "%d", pad);
+	spawn(&(Arg){.v = zen ? zenoncmd : zenoffcmd});
+}
+
+void
 togglebar(const Arg *arg)
 {
 	wlr_scene_node_set_enabled(&selmon->scene_buffer->node,
@@ -3379,7 +3437,7 @@ touchdown(struct wl_listener *listener, void *data)
 	/* Find the client under the pointer and send the event along. */
 	xytonode(lx, ly, &surface, &c, NULL, &sx, &sy);
 	if (sloppyfocus)
-		focusclient(c, 0);
+		focusclient(c, NULL, 0);
 
 	if (surface != NULL) {
 		serial = wlr_seat_touch_notify_down(seat, surface, event->time_msec, event->touch_id, sx, sy);
@@ -3449,11 +3507,11 @@ touchmotion(struct wl_listener *listener, void *data)
 
 	if (c != NULL && surface != NULL) {
 		if (sloppyfocus)
-			focusclient(c, 0);
+			focusclient(c, NULL, 0);
 		wlr_seat_touch_point_focus(seat, surface, event->time_msec, event->touch_id, sx, sy);
 	} else {
 		if (sloppyfocus)
-			focusclient(NULL, 0);
+			focusclient(NULL, NULL, 0);
 		wlr_seat_touch_point_clear_focus(seat, event->time_msec, event->touch_id);
 	}
 	wlr_seat_touch_notify_motion(seat, event->time_msec, event->touch_id, sx, sy);

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Run by dwl -s once WAYLAND_DISPLAY exists; dwl kills this process group on exit.
+S=/home/atis/Projekti/dwl/scripts
+
+# portals (screen sharing, file pickers) and D-Bus activated apps need the Wayland env
+dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP \
+	XDG_SESSION_TYPE QT_QPA_PLATFORM QT_QPA_PLATFORMTHEME QML_IMPORT_PATH QT_QUICK_CONTROLS_STYLE
+
+"$S"/monitor-hotplug          # 120Hz panel / external-only, plus scales
+"$S"/monitor-hotplug watch &
+"$S"/wallpaper &
+"$S"/dunst-wl &
+# owns org.freedesktop.ScreenSaver and runs swayidle only while nothing inhibits it
+# (X session: X screensaver 600s -> xss-lock)
+"$S"/ssinhibit swayidle -w timeout 600 "$S"/lock before-sleep "$S"/lock &
+"$S"/netnotify &
+"$S"/battnotify &
+wait

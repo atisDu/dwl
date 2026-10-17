@@ -1,0 +1,9 @@
+#!/bin/sh
+# Random wallpaper every 15 min, like the X session's feh loop. The new swaybg
+# starts before the old one is killed, so there's no flash of the root colour.
+old=
+while :; do
+  swaybg -m fill -i "$(ls -d "$HOME"/Attēli/tapetes/* | shuf -n 1)" & new=$!
+  sleep 1; [ -n "$old" ] && kill "$old"; old=$new
+  sleep 900
+done

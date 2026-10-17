@@ -1,0 +1,43 @@
+#!/bin/sh
+# wmenu display switcher: layout, plus a per-screen scale that sticks.
+# Wayland scales every output on its own, so a new scale applies at once
+# (the X version could only apply the primary screen's). Bound to XF86Display in dwl.
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/screen-scale
+HOTPLUG=/home/atis/Projekti/dwl/scripts/monitor-hotplug
+INTERNAL=eDP-1
+INTMODE="--mode 2880x1800@120"
+EXTMODE="--mode 1920x1080"
+
+mydmenu() {
+  wmenu -i -l 12 -f 'Fantasque Sans Mono 14' -N '#1d1f21' -n '#eeeeee' -M '#040707' -m '#eeeeee' -S '#040707' -s '#eeeeee' "$@"
+}
+# X called it HDMI-1, DRM calls it HDMI-A-1: take whichever external is connected
+EXTERNAL=$(wlr-randr --json | jq -r --arg i "$INTERNAL" '.[] | select(.name != $i) | .name' | head -1)
+EXTERNAL=${EXTERNAL:-HDMI-A-1}
+
+case $(printf 'tikai iebūvētais\npagarināt\ntikai HDMI\nmērogs…\n' | mydmenu -p 'ekrāns:') in
+'tikai iebūvētais')
+  wlr-randr --output $EXTERNAL --off --output $INTERNAL --on $INTMODE && "$HOTPLUG" rescale
+  ;;
+pagarināt)
+  # external above the panel, left edges aligned (xrandr --above)
+  wlr-randr --output $INTERNAL --on $INTMODE --output $EXTERNAL --on $EXTMODE --pos 0,0 &&
+    "$HOTPLUG" rescale &&
+    h=$(wlr-randr --json | jq -r --arg o "$EXTERNAL" '.[] | select(.name == $o) |
+      (.modes[] | select(.current) | .height) / .scale | floor') &&
+    wlr-randr --output $INTERNAL --pos 0,"$h"
+  ;;
+'tikai HDMI')
+  wlr-randr --output $EXTERNAL --on $EXTMODE --pos 0,0 --output $INTERNAL --off && "$HOTPLUG" rescale
+  ;;
+'mērogs…')
+  out=$(wlr-randr --json | jq -r '.[] | select(.enabled) | .name' | mydmenu -p 'mērogs kuram ekrānam:')
+  [ -n "$out" ] || exit
+  pct=$(printf '100\n125\n150\n160\n175\n200\n' | mydmenu -p "$out mērogs %:")
+  [ -n "$pct" ] || exit
+  { [ -f "$CONF" ] && grep -v "^$out " "$CONF"; printf '%s %s\n' "$out" "$pct"; } > "$CONF.tmp" &&
+    mv "$CONF.tmp" "$CONF"
+  wlr-randr --output "$out" --scale "$(awk -v p="$pct" 'BEGIN{print p/100}')" &&
+    notify-send -t 3000 ekrāns "$out: $pct%"
+  ;;
+esac

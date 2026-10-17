@@ -14,7 +14,7 @@
 static void die(const char *fmt, ...);
 static void *ecalloc(size_t nmemb, size_t size);
 static int fd_set_nonblock(int fd);
-xkb_keysym_t keymap_get_one_sym_by_level(struct xkb_keymap *keymap,
+static xkb_keysym_t keymap_get_one_sym_by_level(struct xkb_keymap *keymap,
         xkb_keycode_t key, xkb_layout_index_t layout, xkb_level_index_t level);
 
 void
@@ -60,7 +60,7 @@ fd_set_nonblock(int fd) {
 	return 0;
 }
 
-xkb_keysym_t
+static xkb_keysym_t
 keymap_get_one_sym_by_level(struct xkb_keymap *keymap, xkb_keycode_t key,
         xkb_layout_index_t layout, xkb_level_index_t level)
 {
