@@ -141,6 +141,9 @@ fail:
 void
 destroytray(Tray *tray)
 {
+	/* updatebar() recreates a monitor's tray on every scale/layout change: unlink it, or
+	 * the next tray update (an app registering an icon) walks into freed memory */
+	wl_list_remove(&tray->link);
 	if (tray->image)
 		pixman_image_unref(tray->image);
 	if (tray->font)

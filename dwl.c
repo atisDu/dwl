@@ -3605,6 +3605,9 @@ setup(void)
 	bus_source = startbus(bus_conn, event_loop);
 	if (!bus_source)
 		die("Failed to start listening to bus events");
+	/* trays are linked here even if another watcher owns the name and this one never starts */
+	wl_list_init(&watcher.items);
+	wl_list_init(&watcher.trays);
 	if (showbar && showsystray)
 		watcher_start(&watcher, bus_conn, event_loop);
 
