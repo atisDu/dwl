@@ -13,6 +13,7 @@ On top of upstream dwl (wlroots 0.20):
   fade+scale out from a snapshot of the last frame (0.10s), geometry slides on retile (0.10s)
 - floating windows centred ([alwayscenter]); rules can set a floating size
 - separate touchpad/mouse acceleration ([mouse-trackpad-split]), touchscreen ([touch-input])
+- Xwayland on (upstream ships it off), for X-only apps
 - keyboard layout menu (Mod+Shift+W): `pkill --signal RTMIN+n -x dwl` loads `kblayouts[n]`
 
 `config.h` is tracked: it is my config, translated from dwm's.
@@ -24,6 +25,14 @@ On top of upstream dwl (wlroots 0.20):
 
 plus slstatus, dunst, kitty, brightnessctl, pactl, powerprofilesctl, nmcli,
 bluetoothctl, fprintd as in the dwm setup.
+
+## Fonts
+
+Subpixel text comes from `~/.config/fontconfig/conf.d/10-subpixel.conf` (rgba rgb,
+like `Xft.rgba` on X) and `gsettings set org.gnome.desktop.interface font-antialiasing rgba`
+for GTK. Keep output scales integer unless you pick one in screenmenu: fractional
+scales are sharp only in apps that speak fractional-scale-v1 (kitty, Firefox, Qt 6);
+Xwayland and GTK 3 apps get resampled.
 
 ## Install
 

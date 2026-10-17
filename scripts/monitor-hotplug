@@ -9,14 +9,13 @@ SCALE_INTERNAL=1.6               # = the X session's DPI 154 / 96
 CONF=${XDG_CONFIG_HOME:-$HOME/.config}/screen-scale   # "OUTPUT PERCENT" per line, from screenmenu
 
 # Per-output scale: the saved % if screenmenu set one, else the taste value for the
-# panel, else the monitor's real DPI / 96 from its mm size (never below 1).
+# panel, else 1. Not the monitor's real DPI like the X version: on Wayland a
+# fractional scale resamples the whole screen (a 24" 1080p came out at 1.05, blurry).
 scale_of() {
 	pct=$([ -f "$CONF" ] && awk -v o="$1" '$1==o{print $2}' "$CONF")
 	[ -n "$pct" ] && { awk -v p="$pct" 'BEGIN{print p/100}'; return; }
 	[ "$1" = "$INTERNAL" ] && { echo $SCALE_INTERNAL; return; }
-	wlr-randr --json | jq -r --arg o "$1" '.[] | select(.name == $o) |
-		((.modes[] | select(.current) | .width) // (.modes[] | select(.preferred) | .width)) as $px |
-		if .physical_size.width > 0 then [($px * 25.4 / .physical_size.width / 96 * 20 | round) / 20, 1] | max else 1 end'
+	echo 1
 }
 
 externals() { wlr-randr --json | jq -r --arg i "$INTERNAL" '.[] | select(.name != $i) | .name'; }
